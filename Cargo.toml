@@ -1,0 +1,23 @@
+[package]
+name = "mazab"
+version = "0.1.0"
+edition = "2021"
+
+[build]
+jobs=4
+rustflags=["target-cpu=native", "target-feature=+bmi2", "target-feature=+crt-static"]
+
+[profile.release]
+debug = true
+
+[dependencies]
+docopt = "1.1.1"
+flate2 = { version = "1.0.17", features = ["zlib-ng"], default-features = false }
+futures = "0.3.28"
+gzp = "0.11.3"
+noodles = { version = "0.50.0", features = ["core", "bam", "bed", "bgzf", "fastq", "gtf", "sam"] }
+rand = "0.8.5"
+threadpool = "1.8.1"
+indicatif = "0.17.6"
+sha2 = "0.10.7"
+coroutines = "0.2.0"
