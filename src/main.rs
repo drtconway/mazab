@@ -11,7 +11,6 @@ use noodles::core::Region;
 use noodles::{bam, sam::alignment::Record};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::{
-    collections::HashMap,
     io::Write,
     sync::{Arc, Mutex},
 };
@@ -139,7 +138,6 @@ where
 }
 
 fn doit2_inner(
-    chrom_num: usize,
     bam: &str,
     chrom_name: &str,
     opt_prog: Option<ProgressBar>,
@@ -216,8 +214,8 @@ pub fn doit2(
         let bam_name = bam.to_string();
         let writers: LocalBlockPairWriter = writers.writers()?;
         pool.execute(move || {
-            let remainder = doit2_inner(chrom_num, &bam_name, &chrom_name, opt_prog, writers)
-                .expect("doit2_inner failed");
+            let remainder =
+                doit2_inner(&bam_name, &chrom_name, opt_prog, writers).expect("doit2_inner failed");
             tx.send((chrom_num, remainder)).expect("send failed");
         });
     }
