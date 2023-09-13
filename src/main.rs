@@ -1,6 +1,8 @@
 use docopt::Docopt;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use mazab::block_writer::{BlockPairWriter, LocalBlockPairWriter};
+use mazab::pairer::Remainder;
+use mazab::summarise::Summariser;
 use mazab::{
     checksum::compute_checksum, files::open_writer, formatter::ReadParFormatter, pairer::Pairer,
     shuffler::Shuffler,
@@ -109,19 +111,18 @@ pub fn make_ok(rec: Record) -> std::io::Result<Record> {
 }
 
 pub fn make_chan() -> (
-    Option<Sender<(usize, HashMap<String, Record>)>>,
-    Receiver<(usize, HashMap<String, Record>)>,
+    Option<Sender<(usize, Remainder)>>,
+    Receiver<(usize, Remainder)>,
 ) {
     let (tx, rx) = channel();
     (Some(tx), rx)
 }
 
 fn doit2_inner_inner<Src>(
-    _chrom_num: usize,
     query: Src,
     opt_prog: Option<ProgressBar>,
     writers: LocalBlockPairWriter,
-) -> std::io::Result<HashMap<String, Record>>
+) -> std::io::Result<Remainder>
 where
     Src: Iterator<Item = std::io::Result<Record>>,
 {
@@ -134,7 +135,7 @@ where
     }
     formatter.flush()?;
 
-    Ok(shuffler.src.tail())
+    Ok(shuffler.src.remainder())
 }
 
 fn doit2_inner(
@@ -143,21 +144,27 @@ fn doit2_inner(
     chrom_name: &str,
     opt_prog: Option<ProgressBar>,
     writers: LocalBlockPairWriter,
-) -> std::io::Result<HashMap<String, Record>> {
+) -> std::io::Result<Remainder> {
     let mut reader = bam::indexed_reader::Builder::default().build_from_path(bam)?;
     let hdr = reader.read_header()?;
 
     if chrom_name == "*" {
         let unmapped = reader.query_unmapped(&hdr)?;
-        return doit2_inner_inner(chrom_num, unmapped, opt_prog, writers);
+        return doit2_inner_inner(unmapped, opt_prog, writers);
     }
 
     let query: bam::reader::Query<std::fs::File> =
         reader.query(&hdr, &Region::new(chrom_name, ..))?;
-    doit2_inner_inner(chrom_num, query, opt_prog, writers)
+    doit2_inner_inner(query, opt_prog, writers)
 }
 
-pub fn doit2(bam: &str, filename_1: &str, filename_2: &str, verbose: bool, num_threads: usize) -> std::io::Result<()> {
+pub fn doit2(
+    bam: &str,
+    filename_1: &str,
+    filename_2: &str,
+    verbose: bool,
+    num_threads: usize,
+) -> std::io::Result<()> {
     let multi = MultiProgress::new();
     let sty = ProgressStyle::with_template(
         "{prefix} [{elapsed_precise}] [{wide_bar}] {percent}% ({pos}/{len})",
@@ -209,16 +216,26 @@ pub fn doit2(bam: &str, filename_1: &str, filename_2: &str, verbose: bool, num_t
         let bam_name = bam.to_string();
         let writers: LocalBlockPairWriter = writers.writers()?;
         pool.execute(move || {
-            let tail = doit2_inner(chrom_num, &bam_name, &chrom_name, opt_prog, writers)
+            let remainder = doit2_inner(chrom_num, &bam_name, &chrom_name, opt_prog, writers)
                 .expect("doit2_inner failed");
-            tx.send((chrom_num, tail)).expect("send failed");
+            tx.send((chrom_num, remainder)).expect("send failed");
         });
     }
     opt_tx.take();
 
+    let mut flags = Vec::new();
+    flags.resize(1 << 16, 0);
+
+    let mut remainder_stats = Summariser::new();
+
     let mut unpaired = vec![];
-    for (chrom_num, tail) in rx {
-        unpaired.push(tail);
+    for (chrom_num, remainder) in rx {
+        for i in 0..remainder.flags.len() {
+            flags[i] += remainder.flags[i];
+        }
+        remainder_stats.add(remainder.tail.len() as f64);
+
+        unpaired.push(remainder);
         if let Some(glob_prog) = &opt_glob_prog {
             glob_prog.inc(chrom_info.2[chrom_num] as u64);
         }
@@ -229,11 +246,35 @@ pub fn doit2(bam: &str, filename_1: &str, filename_2: &str, verbose: bool, num_t
 
     let unpaired_iterator = unpaired
         .into_iter()
-        .flat_map(|x| x.into_values())
+        .flat_map(|x| x.tail.into_values())
         .map(make_ok);
     let writers: LocalBlockPairWriter = writers.writers()?;
-    let _remaining_unpaired = doit2_inner_inner(0, unpaired_iterator, None, writers)?;
+    let final_remainder = doit2_inner_inner(unpaired_iterator, None, writers)?;
 
+    println!("flags: bits\tPAIRED\tPROPER\tUNMAP\tMUNMAP\tREVERSE\tMREVERSE\tREAD1\tREAD2\tSECONDARY\tQCFAIL\tDUP\tSUPPLEMENTARY");
+    for i in 0..flags.len() {
+        if flags[i] == 0 {
+            continue;
+        }
+        println!(
+            "flags: {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            i,
+            flags[i],
+            i & 1,
+            (i >> 1) & 1,
+            (i >> 2) & 1,
+            (i >> 3) & 1,
+            (i >> 4) & 1,
+            (i >> 5) & 1,
+            (i >> 6) & 1,
+            (i >> 7) & 1,
+            (i >> 8) & 1,
+            (i >> 9) & 1,
+            (i >> 10) & 1,
+            (i >> 11) & 1,
+        );
+    }
+    println!("unpaired: {}", final_remainder.tail.len());
     Ok(())
 }
 
@@ -250,14 +291,18 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
-    let num_threads = args.get_count("-t") as usize;
+    let num_threads = args
+        .get_str("-t")
+        .parse::<usize>()
+        .expect("-t must be an integer");
+    println!("num_threads={}", num_threads);
 
     doit2(
         args.get_str("<bam>"),
         args.get_str("<fastq1>"),
         args.get_str("<fastq2>"),
         verbose,
-        num_threads
+        num_threads,
     )?;
 
     Ok(())

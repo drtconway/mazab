@@ -3,12 +3,18 @@ use std::collections::HashMap;
 use indicatif::ProgressBar;
 use noodles::sam::alignment::Record;
 
+pub struct Remainder {
+    pub tail: HashMap<String, Record>,
+    pub flags: Vec<usize>
+}
+
 pub struct Pairer<Src>
 where
     Src: Iterator<Item = std::io::Result<Record>>,
 {
     src: Src,
     cache: HashMap<String, Record>,
+    flags: Vec<usize>,
     opt_prog: Option<ProgressBar>
 }
 
@@ -17,18 +23,24 @@ where
     Src: Iterator<Item = std::io::Result<Record>>,
 {
     pub fn new(src: Src, opt_prog: Option<ProgressBar>) -> Pairer<Src> {
+        let mut flags = Vec::new();
+        flags.resize(1 << 16, 0);
+
         Pairer {
             src,
             cache: HashMap::new(),
+            flags,
             opt_prog
         }
     }
 
-    pub fn tail(&mut self) -> HashMap<String, Record> {
+    pub fn remainder(&mut self) -> Remainder {
         assert!(self.src.next().is_none());
-        let mut res = HashMap::new();
-        std::mem::swap(&mut self.cache, &mut res);
-        res
+        let mut tail = HashMap::new();
+        std::mem::swap(&mut self.cache, &mut tail);
+        let mut flags = Vec::new();
+        std::mem::swap(&mut self.flags, &mut flags);
+        Remainder { tail, flags }
     }
 }
 
@@ -45,6 +57,7 @@ where
             }
             match rec_res {
                 Ok(rec) => {
+                    self.flags[rec.flags().bits() as usize] += 1;
                     if rec.flags().is_supplementary()
                         || rec.flags().is_secondary()
                         || !rec.flags().is_segmented()

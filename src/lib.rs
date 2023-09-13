@@ -6,3 +6,4 @@ pub mod pairer;
 pub mod formatter;
 pub mod block_writer;
 pub mod either;
+pub mod summarise;
