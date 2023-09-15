@@ -1,5 +1,6 @@
 use docopt::Docopt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use flate2::Compression;
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mazab::block_writer::{BlockPairWriter, LocalBlockPairWriter};
 use mazab::pairer::Remainder;
 use mazab::summarise::Summariser;
@@ -23,9 +24,31 @@ Usage: mazab [options] <bam> <fastq1> <fastq2>
 Options:
     -h                      Show this help message.
     -v                      Produce verbose output.
+    -C COMPRESSION          Level of gzip compression (0-9, none, fast, default, best) [default: default]
     -t THREADS              Number of additional threads to used [default: 4]
     -X                      Compute an order-independent digest on the reads.
 ";
+
+pub fn make_compression(txt: &str) -> std::io::Result<Compression> {
+    match txt {
+        "fast" => Ok(Compression::fast()),
+        "default" => Ok(Compression::default()),
+        "best" => Ok(Compression::best()),
+        _ => {
+            let n = txt.parse::<u32>().map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::Other, "invalid compression specifier")
+            })?;
+            if n <= 9 {
+                Ok(Compression::new(n))
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "compression level must be 0-9",
+                ))
+            }
+        }
+    }
+}
 
 pub fn gather_chromosome_info(bam: &str) -> std::io::Result<(Vec<String>, Vec<usize>, Vec<usize>)> {
     let mut reader = bam::indexed_reader::Builder::default().build_from_path(bam)?;
@@ -162,14 +185,16 @@ pub fn doit2(
     filename_2: &str,
     verbose: bool,
     num_threads: usize,
+    compression: Option<Compression>,
 ) -> std::io::Result<()> {
-    let multi = MultiProgress::new();
+    let target = ProgressDrawTarget::stderr_with_hz(1);
+    let multi = MultiProgress::with_draw_target(target);
     let sty = ProgressStyle::with_template(
         "{prefix} [{elapsed_precise}] [{wide_bar}] {percent}% ({pos}/{len})",
     )
     .unwrap();
 
-    let writers: BlockPairWriter = BlockPairWriter::new((filename_1, filename_2))?;
+    let writers: BlockPairWriter = BlockPairWriter::new((filename_1, filename_2), compression)?;
 
     let pool = ThreadPool::new(num_threads);
 
@@ -212,7 +237,7 @@ pub fn doit2(
             None
         };
         let bam_name = bam.to_string();
-        let writers: LocalBlockPairWriter = writers.writers()?;
+        let writers: LocalBlockPairWriter = writers.writers(&chrom_name)?;
         pool.execute(move || {
             let remainder =
                 doit2_inner(&bam_name, &chrom_name, opt_prog, writers).expect("doit2_inner failed");
@@ -246,10 +271,10 @@ pub fn doit2(
         .into_iter()
         .flat_map(|x| x.tail.into_values())
         .map(make_ok);
-    let writers: LocalBlockPairWriter = writers.writers()?;
+    let writers: LocalBlockPairWriter = writers.writers("<>")?;
     let final_remainder = doit2_inner_inner(unpaired_iterator, None, writers)?;
 
-    println!("flags: bits\tPAIRED\tPROPER\tUNMAP\tMUNMAP\tREVERSE\tMREVERSE\tREAD1\tREAD2\tSECONDARY\tQCFAIL\tDUP\tSUPPLEMENTARY");
+    println!("flags: bits\tcount\tPAIRED\tPROPER\tUNMAP\tMUNMAP\tREVERSE\tMREVERSE\tREAD1\tREAD2\tSECONDARY\tQCFAIL\tDUP\tSUPPLEMENTARY");
     for i in 0..flags.len() {
         if flags[i] == 0 {
             continue;
@@ -293,7 +318,13 @@ fn main() -> std::io::Result<()> {
         .get_str("-t")
         .parse::<usize>()
         .expect("-t must be an integer");
-    println!("num_threads={}", num_threads);
+
+    let compression = if args.get_str("-C") != "" && args.get_str("-C") != "none" {
+        let res = make_compression(args.get_str("-C"))?;
+        Some(res)
+    } else {
+        None
+    };
 
     doit2(
         args.get_str("<bam>"),
@@ -301,6 +332,7 @@ fn main() -> std::io::Result<()> {
         args.get_str("<fastq2>"),
         verbose,
         num_threads,
+        compression,
     )?;
 
     Ok(())

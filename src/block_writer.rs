@@ -1,110 +1,113 @@
 use std::{
-    io::Write,
-    sync::{mpsc::{sync_channel, SyncSender}, Mutex},
+    fs::File,
+    io::{Read, Write},
+    sync::mpsc::{sync_channel, SyncSender},
     thread::JoinHandle,
 };
 
-use crate::files::open_writer;
+use flate2::{bufread::GzEncoder, Compression};
 
-pub struct BlockWriter {
-    file: Option<SyncSender<Vec<u8>>>,
+pub struct DataBlock {
+    id: String,
+    data: Vec<u8>,
+}
+
+pub struct BlockPairWriter {
+    compression: Option<Compression>,
+    file: Option<SyncSender<(DataBlock, DataBlock)>>,
     joiner: Option<JoinHandle<std::io::Result<()>>>,
 }
 
-impl BlockWriter {
-    pub fn new(filename: &str) -> BlockWriter {
-        let filename = filename.to_string();
-        let (tx, rx) = sync_channel::<Vec<u8>>(4);
+impl BlockPairWriter {
+    pub fn new(
+        filenames: (&str, &str),
+        compression: Option<Compression>,
+    ) -> std::io::Result<BlockPairWriter> {
+        let inner_filename_0 = filenames.0.to_string();
+        let inner_filename_1 = filenames.1.to_string();
+        let (tx, rx) = sync_channel::<(DataBlock, DataBlock)>(1);
         let handle = std::thread::spawn(move || {
-            let mut file = open_writer(&filename)?;
-            for data in rx {
-                file.write_all(&data)?;
+            let mut file_0 = File::create(&inner_filename_0)?;
+            let mut file_1 = File::create(&inner_filename_1)?;
+            for blocks in rx {
+                //println!("writing {}", blocks.0.id);
+                file_0.write_all(&blocks.0.data)?;
+                //println!("writing {}", blocks.1.id);
+                file_1.write_all(&blocks.1.data)?;
             }
             Ok(())
         });
-        BlockWriter {
+        Ok(BlockPairWriter {
+            compression,
             file: Some(tx),
             joiner: Some(handle),
-        }
+        })
     }
 
-    pub fn writer(&self) -> std::io::Result<LocalBlockWriter> {
-        match &self.file {
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "dead channel",
-            )),
-            Some(file) => Ok(LocalBlockWriter::new(file.clone())),
-        }
+    pub fn writers(&self, id: &str) -> std::io::Result<LocalBlockPairWriter> {
+        Ok(LocalBlockPairWriter {
+            compression: self.compression,
+            id: id.to_string(),
+            block_num: 0,
+            writers: self.file.clone().unwrap(),
+        })
     }
 
     pub fn finish(&mut self) -> std::io::Result<()> {
         self.file.take();
         match self.joiner.take() {
-            None => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "already joined",
-                ))
-            }
-            Some(joiner) => {
-                joiner.join().map(|_| ()).map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "join failed"))
-            }
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "already joined",
+            )),
+            Some(joiner) => joiner
+                .join()
+                .map(|_| ())
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "join failed")),
         }
     }
 }
 
-pub struct LocalBlockWriter {
-    file: SyncSender<Vec<u8>>,
-}
-
-impl LocalBlockWriter {
-    pub fn new(file: SyncSender<Vec<u8>>) -> LocalBlockWriter {
-        LocalBlockWriter { file }
-    }
-}
-
-impl Write for LocalBlockWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let data = Vec::from(buf);
-        self.file
-            .send(data)
-            .map(|_| buf.len())
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "send failed"))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-pub struct BlockPairWriter {
-    block_writers: (BlockWriter, BlockWriter)
-}
-
-impl BlockPairWriter {
-    pub fn new(filenames: (&str, &str)) -> std::io::Result<BlockPairWriter> {
-        let w1 = BlockWriter::new(filenames.0);
-        let w2 = BlockWriter::new(filenames.1);
-        Ok(BlockPairWriter{ block_writers: (w1, w2) })
-    }
-
-    pub fn writers(&self) -> std::io::Result<LocalBlockPairWriter> {
-        let w1 = self.block_writers.0.writer()?;
-        let w2 = self.block_writers.1.writer()?;
-        Ok(LocalBlockPairWriter { writers: Mutex::new((w1, w2)) })
-    }
-}
-
 pub struct LocalBlockPairWriter {
-    writers: Mutex<(LocalBlockWriter, LocalBlockWriter)>
+    compression: Option<Compression>,
+    id: String,
+    block_num: usize,
+    writers: SyncSender<(DataBlock, DataBlock)>,
 }
 
 impl LocalBlockPairWriter {
     pub fn write(&mut self, blocks: (&[u8], &[u8])) -> std::io::Result<()> {
-        let mut writers = self.writers.lock().unwrap();
-        writers.0.write_all(blocks.0)?;
-        writers.1.write_all(blocks.1)?;
+        self.block_num += 1;
+        let block_id_1 = format!("1\t{}:{}", self.id, self.block_num);
+        let block_id_2 = format!("2\t{}:{}", self.id, self.block_num);
+        let data_0 = if let Some(compression) = &self.compression {
+            let mut result = Vec::with_capacity(blocks.0.len());
+            let mut gz = GzEncoder::new(blocks.0, compression.clone());
+            gz.read_to_end(&mut result).unwrap();
+            result
+        } else {
+            Vec::from(blocks.0)
+        };
+        let data_1 = if let Some(compression) = &self.compression {
+            let mut result = Vec::with_capacity(blocks.1.len());
+            let mut gz = GzEncoder::new(blocks.1, compression.clone());
+            gz.read_to_end(&mut result).unwrap();
+            result
+        } else {
+            Vec::from(blocks.0)
+        };
+        self.writers
+            .send((
+                DataBlock {
+                    id: block_id_1,
+                    data: data_0,
+                },
+                DataBlock {
+                    id: block_id_2,
+                    data: data_1,
+                },
+            ))
+            .unwrap();
         Ok(())
     }
 }
