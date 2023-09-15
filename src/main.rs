@@ -305,7 +305,7 @@ fn main() -> std::io::Result<()> {
     let args = Docopt::new(USAGE)
         .and_then(|dopt| dopt.parse())
         .unwrap_or_else(|e| e.exit());
-    println!("{:?}", args);
+    //println!("{:?}", args);
 
     let verbose = args.get_bool("-v");
 
