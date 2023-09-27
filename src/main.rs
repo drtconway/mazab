@@ -26,6 +26,7 @@ Options:
     -v                      Produce verbose output.
     -C COMPRESSION          Level of gzip compression (0-9, none, fast, default, best) [default: default]
     -t THREADS              Number of additional threads to used [default: 4]
+    -U                      Write the read IDs of unpaired reads to stdout.
     -X                      Compute an order-independent digest on the reads.
 ";
 
@@ -186,6 +187,7 @@ pub fn doit2(
     verbose: bool,
     num_threads: usize,
     compression: Option<Compression>,
+    write_unpaired_reads: bool,
 ) -> std::io::Result<()> {
     let target = ProgressDrawTarget::stderr_with_hz(1);
     let multi = MultiProgress::with_draw_target(target);
@@ -298,6 +300,11 @@ pub fn doit2(
         );
     }
     println!("unpaired: {}", final_remainder.tail.len());
+    if write_unpaired_reads {
+        for e in final_remainder.tail.iter() {
+            println!("read_id: {}", e.0);
+        }
+    }
     Ok(())
 }
 
@@ -333,6 +340,7 @@ fn main() -> std::io::Result<()> {
         verbose,
         num_threads,
         compression,
+        args.get_bool("-U"),
     )?;
 
     Ok(())
