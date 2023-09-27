@@ -141,6 +141,33 @@ pub fn make_chan() -> (
     (Some(tx), rx)
 }
 
+pub fn print_flags(prefix: &str, flags: &[usize]) {
+    println!("{}flags: bits\tcount\tPAIRED\tPROPER\tUNMAP\tMUNMAP\tREVERSE\tMREVERSE\tREAD1\tREAD2\tSECONDARY\tQCFAIL\tDUP\tSUPPLEMENTARY", prefix);
+    for i in 0..flags.len() {
+        if flags[i] == 0 {
+            continue;
+        }
+        println!(
+            "{}flags: {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            prefix,
+            i,
+            flags[i],
+            i & 1,
+            (i >> 1) & 1,
+            (i >> 2) & 1,
+            (i >> 3) & 1,
+            (i >> 4) & 1,
+            (i >> 5) & 1,
+            (i >> 6) & 1,
+            (i >> 7) & 1,
+            (i >> 8) & 1,
+            (i >> 9) & 1,
+            (i >> 10) & 1,
+            (i >> 11) & 1,
+        );
+    }
+}
+
 fn doit2_inner_inner<Src>(
     query: Src,
     opt_prog: Option<ProgressBar>,
@@ -276,31 +303,18 @@ pub fn doit2(
     let writers: LocalBlockPairWriter = writers.writers("<>")?;
     let final_remainder = doit2_inner_inner(unpaired_iterator, None, writers)?;
 
-    println!("flags: bits\tcount\tPAIRED\tPROPER\tUNMAP\tMUNMAP\tREVERSE\tMREVERSE\tREAD1\tREAD2\tSECONDARY\tQCFAIL\tDUP\tSUPPLEMENTARY");
-    for i in 0..flags.len() {
-        if flags[i] == 0 {
-            continue;
-        }
-        println!(
-            "flags: {}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
-            i,
-            flags[i],
-            i & 1,
-            (i >> 1) & 1,
-            (i >> 2) & 1,
-            (i >> 3) & 1,
-            (i >> 4) & 1,
-            (i >> 5) & 1,
-            (i >> 6) & 1,
-            (i >> 7) & 1,
-            (i >> 8) & 1,
-            (i >> 9) & 1,
-            (i >> 10) & 1,
-            (i >> 11) & 1,
-        );
-    }
+    print_flags("", &flags);
+
     println!("unpaired: {}", final_remainder.tail.len());
     if write_unpaired_reads {
+        if true {
+            let mut unpaired_flags = Vec::new();
+            unpaired_flags.resize(1 << 16, 0);
+            for e in final_remainder.tail.iter() {
+                unpaired_flags[e.1.flags().bits() as usize] += 1;
+            }
+            print_flags("unpaired_", &unpaired_flags);
+        }
         for e in final_remainder.tail.iter() {
             println!("read_id: {}", e.0);
         }
